@@ -44,7 +44,11 @@ func TestRoundRobin(t *testing.T) {
 		Members:       make(map[string][]byte),
 	}
 	for i := range jreqs {
-		jresp.Members[jreqs[i].MemberId] = jreqs[i].GroupProtocols[string(roundrobin.RoundRobin)]
+		for _, gp := range jreqs[i].OrderedGroupProtocols {
+			if gp.Name == string(roundrobin.RoundRobin) {
+				jresp.Members[jreqs[i].MemberId] = gp.Metadata
+			}
+		}
 	}
 	t.Logf("JoinGroupResponse = %v\n", jresp)
 
