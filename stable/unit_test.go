@@ -601,6 +601,10 @@ func (mc *mockClient) Closed() bool {
 	return false
 }
 
+func (mc *mockClient) InSyncReplicas(string, int32) ([]int32, error) {
+	return nil, sarama.ErrNotEnoughReplicas
+}
+
 // a sortable, comparible list of partition ids
 type partitionslist []int32 // a list of the partition ids
 

@@ -91,6 +91,7 @@ func (*fakeClient) Coordinator(consumerGroup string) (*sarama.Broker, error)    
 func (*fakeClient) RefreshCoordinator(consumerGroup string) error                  { return nil }
 func (*fakeClient) Close() error                                                   { return nil }
 func (*fakeClient) Closed() bool                                                   { return false }
+func (*fakeClient) InSyncReplicas(string, int32) ([]int32, error)                  { return nil, nil }
 
 func (cl *fakeClient) GetOffset(topic string, partition int32, ts_msec int64) (int64, error) {
 	offset := time.Unix(ts_msec/1000, (ts_msec%1000)*1000000).UnixNano()

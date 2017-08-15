@@ -155,3 +155,7 @@ func (mc *mockClient) Close() error {
 func (mc *mockClient) Closed() bool {
 	return false
 }
+
+func (mc *mockClient) InSyncReplicas(string, int32) ([]int32, error) {
+	return nil, sarama.ErrNotEnoughReplicas
+}
