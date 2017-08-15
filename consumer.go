@@ -436,6 +436,7 @@ func (cl *client) run(early_rc chan<- error) {
 	} // else leave sidechannel_queries nil
 
 	// always start the producer, even if it is just a dummy routine that drains and throws away msgs in cl.sidechannel_commit
+	cl.wg.Add(1)
 	go cl.sidechannel_producer(cl.config.SidechannelTopic)
 
 	// commitToSidechannel trys to send the partition offsets to the SidechannelTopic
@@ -468,7 +469,12 @@ func (cl *client) run(early_rc chan<- error) {
 			})
 		}
 
-		cl.sidechannel_commit <- offsets
+		select {
+		case cl.sidechannel_commit <- offsets:
+			// good
+		case <-cl.closed:
+			return
+		}
 	}
 
 	// start the commit timer
@@ -1206,6 +1212,7 @@ func (cl *client) sidechannel_consumer(topic string, queries <-chan sidechannel_
 func (cl *client) sidechannel_producer(topic string) {
 	dbgf("sidechannel_producer(%q)", topic)
 	defer dbgf("sidechannel_producer(%q) exiting", topic)
+	defer cl.wg.Done()
 
 	our_key := []byte(cl.group_name)
 
@@ -1280,10 +1287,14 @@ func (cl *client) sidechannel_producer(topic string) {
 		}
 
 		dbgf("sending offsets to side-channel topic %q", cl.config.SidechannelTopic)
-		producer.Input() <- &sarama.ProducerMessage{
+		select {
+		case producer.Input() <- &sarama.ProducerMessage{
 			Topic: cl.config.SidechannelTopic,
 			Key:   sarama.ByteEncoder(our_key),
 			Value: sarama.ByteEncoder(data),
+		}:
+		case <-cl.closed:
+			return
 		}
 	}
 
@@ -1500,7 +1511,10 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 			}
 		}
 		if try_sidechannel {
-			con.cl.sidechannel_commit <- map[string][]SidechannelOffset{con.topic: sidechannel_offsets}
+			select {
+			case con.cl.sidechannel_commit <- map[string][]SidechannelOffset{con.topic: sidechannel_offsets}:
+			case <-con.cl.closed:
+			}
 		}
 	}
 
