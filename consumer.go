@@ -1469,7 +1469,7 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 				part.consumer.Close()
 				offset := part.oldest
 				if offset == sarama.OffsetNewest || offset == sarama.OffsetOldest {
-					continue // omit this partition, there is no yet offset we can commit
+					continue // omit this partition, we don't have a proper offset for this partition b/c we have not yet received any msgs on this partition yet
 				}
 				if len(part.buckets) != 0 {
 					if part.buckets[0][0] == part.buckets[0][1] {
@@ -1524,7 +1524,7 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 		for p, partition := range partitions {
 			offset := partition.oldest
 			if offset == sarama.OffsetNewest || offset == sarama.OffsetOldest {
-				continue // omit this partition, there is no offset yet that we can commit (we have not yet received any msgs on this partition)
+				continue // omit this partition, we don't have a proper offset for this partition b/c we have not yet received any msgs on this partition yet
 			}
 			if len(partition.buckets) != 0 {
 				if partition.buckets[0][0] == partition.buckets[0][1] {
