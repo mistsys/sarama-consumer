@@ -773,19 +773,13 @@ join_loop:
 			sidechannel_queries: sidechannel_queries,
 		}
 		for _, con := range consumers {
+			// con.assignments has a capacity of 1. the chan is either empty, or contains a stale assignment we can remove and replace
 			select {
 			case con.assignments <- a:
-				// got it on the first try
-			default:
-				// con.assignment is full (it has a capacity of 1)
-				// remove the stale assignment and place this one in its place
-				select {
-				case <-con.assignments:
-					// we have room now (since we're the only code which writes to this channel)
-					con.assignments <- a
-				case con.assignments <- a:
-					// in this case the consumer removed the stale assignment before we could
-				}
+				// a is delivered
+			case <-con.assignments:
+				// we've cleared out the stale assignment. since we've the only code which writes to this channel we now know we have room
+				con.assignments <- a
 			}
 		}
 
