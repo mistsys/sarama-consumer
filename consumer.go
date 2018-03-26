@@ -186,7 +186,7 @@ func NewClient(group_name string, config *Config, sarama_client sarama.Client) (
 		errors: make(chan error),
 
 		closed:             make(chan struct{}),
-		add_consumer:       make(chan add_consumer),
+		add_consumers:      make(chan add_consumers),
 		rem_consumer:       make(chan *consumer),
 		sidechannel_commit: make(chan map[string][]SidechannelOffset),
 	}
@@ -205,6 +205,10 @@ func NewClient(group_name string, config *Config, sarama_client sarama.Client) (
 type Client interface {
 	// Consume returns a consumer of the given topic
 	Consume(topic string) (Consumer, error)
+
+	// ConsumeMany starts consuming many topics at once. It is much more efficient than calling Consume
+	// repeatedly because kafka brokers serialize joining topics
+	ConsumeMany(topics []string) ([]Consumer, error)
 
 	// Close closes the client. It must be called to shutdown
 	// the client. It cleans up any unclosed topic Consumers created by this Client.
@@ -300,8 +304,8 @@ type client struct {
 	closed chan struct{}  // channel which is closed to cause the client to shutdown
 	wg     sync.WaitGroup // waitgroup which is done when the client is shutdown
 
-	add_consumer chan add_consumer // command channel used to add a new consumer
-	rem_consumer chan *consumer    // command channel used to remove an existing consumer
+	add_consumers chan add_consumers // command channel used to add new consumers
+	rem_consumer  chan *consumer     // command channel used to remove an existing consumer
 
 	sidechannel_commit chan map[string][]SidechannelOffset // command channel used to commit to the sidechannel
 }
@@ -309,9 +313,9 @@ type client struct {
 // Errors returns the channel over which asynchronous errors are observed.
 func (cl *client) Errors() <-chan error { return cl.errors }
 
-// add_consumer are the messages sent over the client.add_consumer channel
-type add_consumer struct {
-	con   *consumer
+// add_consumers are the messages sent over the client.add_consumers channel
+type add_consumers struct {
+	cons  []*consumer
 	reply chan<- error
 }
 
@@ -342,7 +346,7 @@ func (cl *client) Consume(topic string) (Consumer, error) {
 	}
 
 	reply := make(chan error)
-	cl.add_consumer <- add_consumer{con, reply}
+	cl.add_consumers <- add_consumers{[]*consumer{con}, reply}
 	err = <-reply
 	if err != nil {
 		// if an error is returned then it is up to us to close the sarama.Consumer
@@ -350,6 +354,51 @@ func (cl *client) Consume(topic string) (Consumer, error) {
 		return nil, err
 	}
 	return con, nil
+}
+
+func (cl *client) ConsumeMany(topics []string) ([]Consumer, error) {
+	sarama_consumer, err := sarama.NewConsumerFromClient(cl.client)
+	if err != nil {
+		return nil, cl.makeError("ConsumeMany sarama.NewConsumerFromClient", err)
+	}
+
+	chanbufsize := cl.client.Config().ChannelBufferSize // give ourselves some capacity once I know it runs right without any (capacity hides bugs :-)
+
+	consumers := make([]*consumer, len(topics))
+	for i, topic := range topics {
+		consumers[i] = &consumer{
+			cl:       cl,
+			consumer: sarama_consumer,
+			topic:    topic,
+
+			messages: make(chan *sarama.ConsumerMessage, chanbufsize),
+
+			closed: make(chan struct{}),
+			exited: make(chan struct{}),
+
+			assignments: make(chan *assignment, 1),
+			commit_reqs: make(chan commit_req),
+
+			restart_partitions: make(chan *partition),
+			premessages:        make(chan *sarama.ConsumerMessage, chanbufsize),
+			done:               make(chan *sarama.ConsumerMessage, chanbufsize),
+		}
+	}
+
+	reply := make(chan error)
+	cl.add_consumers <- add_consumers{consumers, reply}
+	err = <-reply
+	if err != nil {
+		// if an error is returned then it is up to us to close the sarama.Consumer
+		_ = sarama_consumer.Close() // we already have an error to return. a 2nd one is too much
+		return nil, err
+	}
+
+	cons := make([]Consumer, len(consumers))
+	for i := range consumers {
+		cons[i] = consumers[i]
+	}
+	return cons, nil
 }
 
 // Close shutsdown the client and any remaining Consumers.
@@ -373,17 +422,26 @@ func (cl *client) run(early_rc chan<- error) {
 	defer dbgf("consumer-group %q client exiting", cl.group_name)
 
 	// add a consumer
-	add := func(add add_consumer) {
-		dbgf("client.run add(topic %q)", add.con.topic)
-		if _, ok := consumers[add.con.topic]; ok {
-			// topic already is being consumed. the way the standard kafka 0.9 group coordination works you cannot consume twice with the
-			// same client. If you want to consume the same topic twice, use two Clients.
-			add.reply <- cl.makeError("Consume", fmt.Errorf("topic %q is already being consumed", add.con.topic))
-			return
+	add := func(add add_consumers) {
+		dbgf("client.run add(%d topics)", len(add.cons))
+
+		// first make sure we aren't already consuming any of these topics
+		for _, con := range add.cons {
+			if _, ok := consumers[con.topic]; ok {
+				// topic already is being consumed. the way the standard kafka 0.9 group coordination works you cannot consume twice with the
+				// same client. If you want to consume the same topic twice, use two Clients.
+				add.reply <- cl.makeError("Consume", fmt.Errorf("topic %q is already being consumed", con.topic))
+				return
+			}
 		}
-		consumers[add.con.topic] = add.con
-		wg.Add(1)
-		go add.con.run(&wg)
+
+		// then start them all at once, so that the next time we send a join we contain all these topics
+		for _, con := range add.cons {
+			dbgf("client.run add(topic %q)", con.topic)
+			consumers[con.topic] = con
+			wg.Add(1)
+			go con.run(&wg)
+		}
 		add.reply <- nil
 	}
 	// remove a consumer
@@ -508,7 +566,7 @@ join_loop:
 					// shutdown the remaining consumers
 					shutdown()
 					return
-				case a := <-cl.add_consumer:
+				case a := <-cl.add_consumers:
 					add(a)
 				case r := <-cl.rem_consumer:
 					rem(r)
@@ -946,7 +1004,7 @@ join_loop:
 				// pick up the change in the next interval.
 				metadata_timer = time.After(clconfig.Metadata.RefreshFrequency)
 
-			case a := <-cl.add_consumer:
+			case a := <-cl.add_consumers:
 				add(a)
 				// and rejoin so we can become a member of the new topic
 				continue join_loop
