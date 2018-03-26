@@ -759,7 +759,7 @@ join_loop:
 			for k, v := range assignments {
 				n := len(parts)
 				parts := append(parts, v...)
-				acopy[k] = parts[n:]
+				acopy[k] = parts[n:len(parts):len(parts)]
 			}
 			cl.config.AssignmentNotification(acopy)
 		}
