@@ -255,7 +255,7 @@ type Consumer interface {
 	// Never calling AsyncClose is also permitted. Client.Close() implies Consumer.AsyncClose.
 	AsyncClose()
 
-	// Close() terminates the consumer and waits for it to be finished committing the current
+	// Close terminates the consumer and waits for it to be finished committing the current
 	// offsets to kafka. Calling twice happens to work at the moment, but let's not encourage it.
 	Close()
 }
