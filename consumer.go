@@ -341,7 +341,6 @@ func (cl *client) Consume(topic string) (Consumer, error) {
 		commit_reqs: make(chan commit_req),
 
 		restart_partitions: make(chan *partition),
-		premessages:        make(chan *sarama.ConsumerMessage, chanbufsize),
 		done:               make(chan *sarama.ConsumerMessage, chanbufsize),
 	}
 
@@ -380,7 +379,6 @@ func (cl *client) ConsumeMany(topics []string) ([]Consumer, error) {
 			commit_reqs: make(chan commit_req),
 
 			restart_partitions: make(chan *partition),
-			premessages:        make(chan *sarama.ConsumerMessage, chanbufsize),
 			done:               make(chan *sarama.ConsumerMessage, chanbufsize),
 		}
 	}
@@ -1416,7 +1414,6 @@ type consumer struct {
 	commit_reqs chan commit_req  // channel over which client.run sends consumer.run request to fill out a OffsetCommitRequest
 
 	restart_partitions chan *partition              // channel through which partition.run delivers partition restart [at new offset] requests
-	premessages        chan *sarama.ConsumerMessage // channel through which partition.run delivers messages to consumer.run
 	done               chan *sarama.ConsumerMessage // channel through which Done() returns messages
 }
 
@@ -1571,20 +1568,11 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 	}
 
 	// handle a commit request from client.run
-	commit_req := func(c commit_req) {
+	commit := func(c commit_req) {
 		dbgf("consumer %q commit_req(%v)", con.topic, c)
-		for p, partition := range partitions {
-			offset := partition.oldest
-			if offset == sarama.OffsetNewest || offset == sarama.OffsetOldest {
-				continue // omit this partition, we don't have a proper offset for this partition b/c we have not yet received any msgs on this partition yet
-			}
-			if len(partition.buckets) != 0 {
-				if partition.buckets[0][0] == partition.buckets[0][1] {
-					// add to that the portion of the last block we know been completed (this is useful when the message rate is slow)
-					offset += int64(partition.buckets[0][1])
-				} // else we don't know enough to commit any further
-			}
-			c.resp <- commit_resp{topic: con.topic, partition: p, offset: offset}
+		for _, partition := range partitions {
+			c.wg.Add(1)
+			partition.commit_reqs <- c
 		}
 		c.wg.Done()
 	}
@@ -1607,7 +1595,7 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 		for {
 			select {
 			case c := <-con.commit_reqs:
-				commit_req(c)
+				commit(c)
 			case <-con.assignments:
 				// ignore them, we're shutting down
 			case con.cl.rem_consumer <- con:
@@ -1621,7 +1609,7 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 		// drain any remaining requests from run.client, until
 		// run.client closes the channels
 		for c := range con.commit_reqs {
-			commit_req(c)
+			commit(c)
 		}
 		for range con.assignments {
 			// ignore them
@@ -1632,7 +1620,7 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 		wg.Done()
 	}()
 
-	// handle a message sent to us via con.done
+	// deliver a completed message to the partition from whence it came
 	done := func(msg *sarama.ConsumerMessage) {
 		msgf("consumer done(%q:%d/%d)", msg)
 
@@ -1647,28 +1635,8 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 			dbgf("no partition %d in topic %q", msg.Partition, con.topic)
 			return
 		}
-		delta := msg.Offset - part.oldest
-		if delta < 0 {
-			dbgf("stale message %q:%d/%d", msg.Topic, msg.Partition, msg.Offset)
-			return
-		}
-		index := int(delta) >> 6 //  /64
-		if index >= len(part.buckets) {
-			dbgf("early message %d/%d", msg.Partition, msg.Offset)
-			return
-		}
-		part.buckets[index][1]++
-		if index == 0 {
-			// we might have finished the oldest bucket
-			for part.buckets[0] == [2]uint8{64, 64} {
-				// the oldest bucket is complete; advance the last committed offset
-				part.oldest += 64
-				part.buckets = part.buckets[1:]
-				if len(part.buckets) == 0 {
-					break
-				}
-			}
-		}
+
+		part.done <- msg
 	}
 
 	// handle an assignment message
@@ -1805,10 +1773,12 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 				}
 
 				part := &partition{
-					con:       con,
-					consumer:  consumer,
-					partition: p,
-					oldest:    offset,
+					con:         con,
+					consumer:    consumer,
+					partition:   p,
+					oldest:      offset,
+					commit_reqs: make(chan commit_req),
+					done:        make(chan *sarama.ConsumerMessage, con.cl.client.Config().ChannelBufferSize),
 				}
 				go part.run()
 
@@ -1861,6 +1831,7 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 			consumer:  consumer,
 			partition: p,
 			oldest:    offset,
+			done:      make(chan *sarama.ConsumerMessage, con.cl.client.Config().ChannelBufferSize),
 		}
 		go part.run()
 		partitions[p] = part
@@ -1868,61 +1839,12 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 
 	for {
 		select {
-		case msg := <-con.premessages:
-			msgf("premessage msg %q:%d/%d", msg)
-			// keep track of msg's offset so we can match it with Done, and deliver the msg
-			part := partitions[msg.Partition]
-			if part == nil {
-				// message from a stale consumer; ignore it
-				dbgf("no partition %d", msg.Partition)
-				continue
-			}
-			if part.oldest == sarama.OffsetNewest || part.oldest == sarama.OffsetOldest {
-				// we now know the starting offset. make as if we'd been asked to start there
-				part.oldest = msg.Offset
-			}
-			delta := msg.Offset - part.oldest
-			if delta < 0 { // || delta > max-out-of-order  (TODO)
-				dbgf("stale message %q:%d/%d", msg.Topic, msg.Partition, msg.Offset)
-				// we can't take this message into account
-				continue
-			}
-			index := int(delta) >> 6 //  /64
-			for index >= len(part.buckets) {
-				// add a new bucket
-				part.buckets = append(part.buckets, [2]uint8{0, 0})
-			}
-			part.buckets[index][0]++
-
-			// and deliver the msg (or handle any of the other messages which can arrive)
-		deliver_loop:
-			for {
-				select {
-				case con.messages <- msg:
-					msgf("delivered msg %q:%d/%d", msg)
-					// success
-					break deliver_loop
-
-				case msg2 := <-con.done:
-					done(msg2)
-				case a := <-con.assignments:
-					assignment(a)
-				case c := <-con.commit_reqs:
-					commit_req(c)
-				case p := <-con.restart_partitions:
-					restart_partition(p)
-				case <-con.closed:
-					// the defered operations do the work
-					return
-				}
-			}
-
 		case msg := <-con.done:
 			done(msg)
 		case a := <-con.assignments:
 			assignment(a)
 		case c := <-con.commit_reqs:
-			commit_req(c)
+			commit(c)
 		case p := <-con.restart_partitions:
 			restart_partition(p)
 		case <-con.closed:
@@ -1953,6 +1875,9 @@ type partition struct {
 	// any time the two counts are equal then the offsets are committable. Otherwise we can't tell which is the not yet Done() offset and so we don't know
 	buckets [][2]uint8
 	oldest  int64 // 1st offset in bucket[0], or OffsetNewest or OffsetOldest if we haven't received any msgs and started at one of those offsets
+
+	commit_reqs chan commit_req // channel over which client.run sends consumer.run request to fill out a OffsetCommitRequest
+	done        chan *sarama.ConsumerMessage
 }
 
 // wrap a sarama.ConsumerError into an *Error
@@ -1967,17 +1892,97 @@ func (part *partition) makeConsumerError(cerr *sarama.ConsumerError) *Error {
 func (part *partition) run() {
 	con := part.con
 	defer dbgf("partition consumer of %q partition %d exiting", con.topic, part.partition)
+
+	// handle a message sent to us via part.done
+	done := func(msg *sarama.ConsumerMessage) {
+		msgf("partition done(%q:%d/%d)", msg)
+
+		delta := msg.Offset - part.oldest
+		if delta < 0 {
+			dbgf("stale message %q:%d/%d", msg.Topic, msg.Partition, msg.Offset)
+			return
+		}
+		index := int(delta) >> 6 //  /64
+		if index >= len(part.buckets) {
+			dbgf("early message %d/%d", msg.Partition, msg.Offset)
+			return
+		}
+		part.buckets[index][1]++
+		if index == 0 {
+			// we might have finished the oldest bucket
+			for part.buckets[0] == [2]uint8{64, 64} {
+				// the oldest bucket is complete; advance the last committed offset
+				part.oldest += 64
+				part.buckets = part.buckets[1:]
+				if len(part.buckets) == 0 {
+					break
+				}
+			}
+		}
+	}
+
+	// handle a commit request from client.run
+	commit := func(c commit_req) {
+		offset := part.oldest
+		if offset == sarama.OffsetNewest || offset == sarama.OffsetOldest {
+			// omit this partition, we don't have a proper offset for this partition b/c we have not yet received any msgs on this partition yet
+			c.wg.Done()
+			return
+		}
+		if len(part.buckets) != 0 {
+			if part.buckets[0][0] == part.buckets[0][1] {
+				// add to that the portion of the last block we know been completed (this is useful when the message rate is slow)
+				offset += int64(part.buckets[0][1])
+			} // else we don't know enough to commit any further
+		}
+		c.resp <- commit_resp{topic: con.topic, partition: part.partition, offset: offset}
+		c.wg.Done()
+	}
+
 	msgs := part.consumer.Messages()
 	errors := part.consumer.Errors()
 	for {
 		select {
+		case msg := <-part.done:
+			done(msg)
+
 		case msg, ok := <-msgs:
 			if ok {
 				msgf("got msg %q:%d/%d", msg)
-				select {
-				case con.premessages <- msg:
-				case <-con.closed:
-					return
+
+				// keep track of msg's offset so we can match it with Done, and deliver the msg
+				if part.oldest == sarama.OffsetNewest || part.oldest == sarama.OffsetOldest {
+					// we now know the starting offset. make as if we'd been asked to start there
+					part.oldest = msg.Offset
+				}
+				delta := msg.Offset - part.oldest
+				if delta < 0 { // || delta > max-out-of-order  (TODO)
+					msgf("stale message %q:%d/%d", msg)
+					// we can't take this message into account
+					continue
+				}
+				index := int(delta) >> 6 //  /64
+				for index >= len(part.buckets) {
+					// add a new bucket
+					part.buckets = append(part.buckets, [2]uint8{0, 0})
+				}
+				part.buckets[index][0]++
+
+				// and deliver the msg (or handle any of the other cases which can arise)
+			deliver_loop:
+				for {
+					select {
+					case con.messages <- msg:
+						msgf("delivered msg %q:%d/%d", msg)
+						// success
+						break deliver_loop
+					case msg2 := <-part.done:
+						done(msg2)
+					case c := <-con.commit_reqs:
+						commit(c)
+					case <-con.closed:
+						return
+					}
 				}
 			} else {
 				dbgf("draining topic %q partition %d errors", con.topic, part.partition)
@@ -1987,6 +1992,7 @@ func (part *partition) run() {
 				}
 				return
 			}
+
 		case sarama_err, ok := <-errors:
 			if ok {
 				// pick out ErrOffsetOutOfRange errors. These happen if the consumer offset falls off the tail of the kafka log.
@@ -1997,6 +2003,11 @@ func (part *partition) run() {
 					logf("consumer %q of %q partition %d received ErrOffsetOutOfRange and will be restarted", con.cl.group_name, con.topic, part.partition)
 					select {
 					case con.restart_partitions <- part:
+						// msg delivered
+					case msg2 := <-part.done:
+						done(msg2)
+					case c := <-con.commit_reqs:
+						commit(c)
 					case <-con.closed:
 						return
 					}
@@ -2005,17 +2016,12 @@ func (part *partition) run() {
 				// and always deliver the error
 				con.cl.deliverError("", part.makeConsumerError(sarama_err))
 			} else {
-				// finish off any remaining messages, and exit
-				dbgf("draining topic %q partition %d msgs", con.topic, part.partition)
-				for msg := range msgs {
-					select {
-					case con.premessages <- msg:
-					case <-con.closed:
-						return
-					}
-				}
-				return
+				// remove this case from the select; we'll exit when we see msgs has closed
+				errors = nil
 			}
+
+		case c := <-con.commit_reqs:
+			commit(c)
 		}
 	}
 }
