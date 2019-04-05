@@ -13,7 +13,9 @@ import (
 	"log"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/Shopify/sarama"
 	"github.com/mistsys/sarama-consumer/roundrobin"
@@ -338,10 +340,9 @@ func (cl *client) Consume(topic string) (Consumer, error) {
 		exited: make(chan struct{}),
 
 		assignments: make(chan *assignment, 1),
-		commit_reqs: make(chan commit_req),
+		commit_reqs: make(chan commit_req, 1), // a capacity of 1 allows us to burst the requests to all consumers in the common case that commit reqs don't happen concurrently
 
 		restart_partitions: make(chan *partition),
-		done:               make(chan *sarama.ConsumerMessage, chanbufsize),
 	}
 
 	reply := make(chan error)
@@ -376,10 +377,9 @@ func (cl *client) ConsumeMany(topics []string) ([]Consumer, error) {
 			exited: make(chan struct{}),
 
 			assignments: make(chan *assignment, 1),
-			commit_reqs: make(chan commit_req),
+			commit_reqs: make(chan commit_req, 1), // a capacity of 1 allows us to burst the requests to all consumers in the common case that commit reqs don't happen concurrently
 
 			restart_partitions: make(chan *partition),
-			done:               make(chan *sarama.ConsumerMessage, chanbufsize),
 		}
 	}
 
@@ -507,8 +507,8 @@ func (cl *client) run(early_rc chan<- error) {
 		// gather up the offsets to commit
 		var wg sync.WaitGroup
 		resp := make(chan commit_resp)
+		wg.Add(len(consumers))
 		for _, con := range consumers {
-			wg.Add(1)
 			con.commit_reqs <- commit_req{resp, &wg}
 		}
 		go func(resp chan commit_resp, wg *sync.WaitGroup) {
@@ -1413,8 +1413,9 @@ type consumer struct {
 	assignments chan *assignment // channel over which client.run sends consumer.run each generation's partition assignments
 	commit_reqs chan commit_req  // channel over which client.run sends consumer.run request to fill out a OffsetCommitRequest
 
-	restart_partitions chan *partition              // channel through which partition.run delivers partition restart [at new offset] requests
-	done               chan *sarama.ConsumerMessage // channel through which Done() returns messages
+	restart_partitions chan *partition // channel through which partition.run delivers partition restart [at new offset] requests
+
+	partitions unsafe.Pointer // *map[int32]*partition // constant map. access with atomic.LoadPointer
 }
 
 // commit_req is a request for a consumer to send back the client its part into a OffsetCommitRequest
@@ -1492,6 +1493,54 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 
 	partitions := make(map[int32]*partition) // map of partition number -> partition consumer
 
+	add_partition := func(part *partition) {
+		// do
+		//   paritions[part.partition] = part
+		// without disturbing the current map
+		next_partitions := make(map[int32]*partition, len(partitions)+1)
+		for k, v := range partitions {
+			next_partitions[k] = v
+		}
+		next_partitions[part.partition] = part
+		atomic.StorePointer(&con.partitions, unsafe.Pointer(&next_partitions))
+		partitions = next_partitions
+	}
+	delete_partition := func(p int32) {
+		// construct a new map, omitting this partition
+		// we can't simply
+		//    delete(partitions, p)
+		// because callers of Done() are possibly doing lookups in partitions while we run
+		next_partitions := make(map[int32]*partition, len(partitions)-1)
+		for k, v := range partitions {
+			if k != p {
+				next_partitions[k] = v
+			}
+		}
+		atomic.StorePointer(&con.partitions, unsafe.Pointer(&next_partitions))
+		// past this point a new call to Done() cannot find this partition. However any in-progress calls to Done() still can,
+		// and might be stuck in the message send. That is why the part.run() must drain part.done after receiving the close signal
+		partitions = next_partitions
+	}
+	delete_partitions := func(parts []int32) {
+		// two common cases
+		if len(parts) == 0 {
+			return
+		}
+		if len(parts) == 1 {
+			delete_partition(parts[0])
+			return
+		}
+		next_partitions := make(map[int32]*partition, len(partitions))
+		for k, v := range partitions {
+			next_partitions[k] = v
+		}
+		for _, p := range parts {
+			delete(next_partitions, p)
+		}
+		atomic.StorePointer(&con.partitions, unsafe.Pointer(&next_partitions))
+		partitions = next_partitions
+	}
+
 	// shutdown the removed partitions, committing their last offset
 	remove := func(removed []int32) {
 		dbgf("consumer %q rem(%v)", con.topic, removed)
@@ -1511,10 +1560,10 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 			ocreq.RetentionTime = -1 // use broker's value
 		}
 		var sidechannel_offsets = make([]SidechannelOffset, 0, len(removed))
+		delete_partitions(removed)
 		for _, p := range removed {
 			// stop consuming from partition p
 			if part, ok := partitions[p]; ok {
-				delete(partitions, p)
 				part.consumer.Close()
 				offset := part.oldest
 				if offset == sarama.OffsetNewest || offset == sarama.OffsetOldest {
@@ -1570,8 +1619,8 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 	// handle a commit request from client.run
 	commit := func(c commit_req) {
 		dbgf("consumer %q commit_req(%v)", con.topic, c)
+		c.wg.Add(len(partitions))
 		for _, partition := range partitions {
-			c.wg.Add(1)
 			partition.commit_reqs <- c
 		}
 		c.wg.Done()
@@ -1601,9 +1650,6 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 			case con.cl.rem_consumer <- con:
 				break rem_loop
 			}
-			// NOTE: <-con.done is not a case above because there is no good way to shut it down. it is never closed,
-			// so we'd never know when it was drained. As a consequence, it's client.Done() which aborts when the
-			// consumer closes, rather than us draining con.done
 		}
 
 		// drain any remaining requests from run.client, until
@@ -1619,25 +1665,6 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 		close(con.exited)
 		wg.Done()
 	}()
-
-	// deliver a completed message to the partition from whence it came
-	done := func(msg *sarama.ConsumerMessage) {
-		msgf("consumer done(%q:%d/%d)", msg)
-
-		// a sanity check, just in case someone passes the msg into the wrong consumer
-		if con.topic != msg.Topic {
-			con.deliverError("Done()", -1, fmt.Errorf("BUG: Message from topic %q passed to consumer(%q).Done()", msg.Topic, con.topic))
-			return
-		}
-
-		part := partitions[msg.Partition]
-		if part == nil {
-			dbgf("no partition %d in topic %q", msg.Partition, con.topic)
-			return
-		}
-
-		part.done <- msg
-	}
 
 	// handle an assignment message
 	assignment := func(a *assignment) {
@@ -1777,7 +1804,7 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 					consumer:    consumer,
 					partition:   p,
 					oldest:      offset,
-					commit_reqs: make(chan commit_req),
+					commit_reqs: make(chan commit_req, 1), // a capacity of 1 allows us to burst the requests to all partitions in the common case that commit reqs don't happen concurrently
 					done:        make(chan *sarama.ConsumerMessage, con.cl.client.Config().ChannelBufferSize),
 				}
 				go part.run()
@@ -1806,7 +1833,7 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 			// this is an unknown partition, or we've already killed it; ignore the request
 			return
 		}
-		delete(partitions, p)
+		delete_partition(p)
 		part.consumer.Close()
 
 		// then ask what the new starting offset should be
@@ -1827,20 +1854,23 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 		logf("consumer %q restarting consuming %q partition %d at offset %d", con.cl.group_name, con.topic, p, offset)
 
 		part = &partition{
-			con:       con,
-			consumer:  consumer,
-			partition: p,
-			oldest:    offset,
-			done:      make(chan *sarama.ConsumerMessage, con.cl.client.Config().ChannelBufferSize),
+			con:         con,
+			consumer:    consumer,
+			partition:   p,
+			oldest:      offset,
+			commit_reqs: make(chan commit_req, 1), // a capacity of 1 allows us to burst the requests to all partitions in the common case that commit reqs don't happen concurrently
+			done:        make(chan *sarama.ConsumerMessage, con.cl.client.Config().ChannelBufferSize),
 		}
 		go part.run()
-		partitions[p] = part
+
+		// do
+		//   partitions[p] = part
+		// without changing the current map
+		add_partition(part)
 	}
 
 	for {
 		select {
-		case msg := <-con.done:
-			done(msg)
 		case a := <-con.assignments:
 			assignment(a)
 		case c := <-con.commit_reqs:
@@ -1857,8 +1887,30 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 func (con *consumer) Done(msg *sarama.ConsumerMessage) {
 	// send it back to consumer.run to be processed synchronously
 	msgf("Done(%q:%d/%d)", msg)
+
+	// a sanity check, just in case someone passes the msg into the wrong consumer
+	if con.topic != msg.Topic {
+		dbgf("BUG: Message from topic %q passed to consumer(%q).Done()", msg.Topic, con.topic)
+		return
+	}
+
+	// find the partition, if we still own it, and deliver the msg to the partition
+	// note that we have to be careful because we're not in the consumer goroutine,
+	// so things can be changing from under us. The promise is that the con.partitions
+	// is not going to change
+	p_partitions := (*map[int32]*partition)(atomic.LoadPointer(&con.partitions))
+	if p_partitions == nil {
+		// we have no partitions at the moment; ignore the Done()
+		return
+	}
+	part := (*p_partitions)[msg.Partition]
+	if part == nil {
+		// we don't own the partition any more; ignore the Done(), it came too late
+		return
+	}
+
 	select {
-	case con.done <- msg:
+	case part.done <- msg:
 		// great, msg delivered
 	case <-con.closed:
 		// consumer has closed
@@ -1876,8 +1928,8 @@ type partition struct {
 	buckets [][2]uint8
 	oldest  int64 // 1st offset in bucket[0], or OffsetNewest or OffsetOldest if we haven't received any msgs and started at one of those offsets
 
-	commit_reqs chan commit_req // channel over which client.run sends consumer.run request to fill out a OffsetCommitRequest
-	done        chan *sarama.ConsumerMessage
+	commit_reqs chan commit_req              // channel over which client.run sends consumer.run request to fill out a OffsetCommitRequest
+	done        chan *sarama.ConsumerMessage // channel through which Done() returns messages
 }
 
 // wrap a sarama.ConsumerError into an *Error
