@@ -1525,9 +1525,9 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 				}
 				if len(part.buckets) != 0 {
 					// add to that the portion of the last block we know been completed (this is often useful when the traffic rate is low or a client shuts down cleanly, since it has probably cleanly returned all offsets we've delivered)
-					if part.buckets[0][0] == part.buckets[0][1] {
+					if part.buckets[0].read == part.buckets[0].done {
 						// we can advance (or repeat) the highwater mark in the 1st bucket
-						part.bucket_0_highwater = part.buckets[0][1]
+						part.bucket_0_highwater = part.buckets[0].done
 					} // else we don't know enough to advance the highwater mark
 					offset += int64(part.bucket_0_highwater)
 				}
@@ -1581,10 +1581,10 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 				continue // omit this partition, we don't have a proper offset for this partition b/c we have not yet received any msgs on this partition yet
 			}
 			if len(partition.buckets) != 0 {
-				dbgf("%s/%d bucket at offset %d is %d,%d", con.topic, p, offset, partition.buckets[0][0], partition.buckets[0][1])
-				if partition.buckets[0][0] == partition.buckets[0][1] {
+				dbgf("%s/%d bucket at offset %d is %d,%d", con.topic, p, offset, partition.buckets[0].read, partition.buckets[0].done)
+				if partition.buckets[0].read == partition.buckets[0].done {
 					// we can advance (or repeat) the highwater mark in the 1st bucket
-					partition.bucket_0_highwater = partition.buckets[0][1]
+					partition.bucket_0_highwater = partition.buckets[0].done
 				} // else we don't know enough to advance the highwater mark
 				// add to that the portion of the last block we know been completed (this is useful when the message rate is slow)
 				offset += int64(partition.bucket_0_highwater)
@@ -1657,17 +1657,17 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 			dbgf("stale message %q:%d/%d", msg.Topic, msg.Partition, msg.Offset)
 			return
 		}
-		index := int(delta) >> 6 //  /64
+		index := int(delta) >> lg2_offsets_per_bucket
 		if index >= len(part.buckets) {
 			dbgf("early message %d/%d", msg.Partition, msg.Offset)
 			return
 		}
-		part.buckets[index][1]++
+		part.buckets[index].done++
 		if index == 0 {
 			// we might have finished the oldest bucket
-			for part.buckets[0] == [2]uint8{64, 64} {
+			for part.buckets[0].done == offsets_per_bucket {
 				// the oldest bucket is complete; advance the last committed offset
-				part.oldest += 64
+				part.oldest += offsets_per_bucket
 				part.bucket_0_highwater = 0
 				part.buckets = part.buckets[1:]
 				if len(part.buckets) == 0 {
@@ -1888,17 +1888,17 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 				part.oldest = msg.Offset
 			}
 			delta := msg.Offset - part.oldest
-			if delta < 0 { // || delta > max-out-of-order  (TODO)
+			if delta < 0 { // || delta > max-out-of-order  (TODO if needed, which so far hasn't been the case)
 				dbgf("stale message %q:%d/%d", msg.Topic, msg.Partition, msg.Offset)
 				// we can't take this message into account
 				continue
 			}
-			index := int(delta) >> 6 //  /64
+			index := int(delta) >> lg2_offsets_per_bucket
 			for index >= len(part.buckets) {
 				// add a new bucket
-				part.buckets = append(part.buckets, [2]uint8{0, 0})
+				part.buckets = append(part.buckets, bucket{})
 			}
-			part.buckets[index][0]++
+			part.buckets[index].read++
 
 			// and deliver the msg (or handle any of the other messages which can arrive)
 		deliver_loop:
@@ -1955,12 +1955,22 @@ type partition struct {
 	consumer  sarama.PartitionConsumer
 	partition int32 // partition number
 	// buckets of # of offsets read from kafka, and the # of offsets completed by a call to Done(). the difference is the # of offsets in flight in the calling code
-	// we group offsets in groups of 64 and simply keep a count of how many are outstanding
+	// we group offsets in groups of 128 (offsets_per_bucket) and simply keep a count of how many are outstanding
 	// any time the two counts are equal then the offsets are committable. Otherwise we can't tell which is the not yet Done() offset and so we don't know
-	buckets            [][2]uint8
+	buckets            []bucket
 	bucket_0_highwater uint8 // highwater mark of commits from buckets[0]
 	oldest             int64 // 1st offset in bucket[0], or OffsetNewest or OffsetOldest if we haven't received any msgs and started at one of those offsets
 }
+
+// a bucket of message offsets. It contains counts of the msgs with offsets in the range base to base+offsets_per_bucket
+type bucket struct {
+	read uint8 // count of how many messages have been read from kafka
+	done uint8 // count of how many messages are Done()
+}
+
+// log base 2 of the number of offsets in a bucket
+const lg2_offsets_per_bucket = 7 // using 128 gets rid of the edge case of 0 == 256, which I fear would be a source of bugs
+const offsets_per_bucket = 1 << lg2_offsets_per_bucket
 
 // wrap a sarama.ConsumerError into an *Error
 func (part *partition) makeConsumerError(cerr *sarama.ConsumerError) *Error {
