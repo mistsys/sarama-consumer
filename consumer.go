@@ -1524,10 +1524,12 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 					continue // omit this partition, we don't have a proper offset for this partition b/c we have not yet received any msgs on this partition yet
 				}
 				if len(part.buckets) != 0 {
+					// add to that the portion of the last block we know been completed (this is often useful when the traffic rate is low or a client shuts down cleanly, since it has probably cleanly returned all offsets we've delivered)
 					if part.buckets[0][0] == part.buckets[0][1] {
-						// add to that the portion of the last block we know been completed (this is often useful when the traffic rate is low or a client shuts down cleanly, since it has probably cleanly returned all offsets we've delivered)
-						offset += int64(part.buckets[0][1])
-					} // else we don't know enough to commit any further
+						// we can advance (or repeat) the highwater mark in the 1st bucket
+						part.bucket_0_highwater = part.buckets[0][1]
+					} // else we don't know enough to advance the highwater mark
+					offset += int64(part.bucket_0_highwater)
 				}
 				dbgf("ocreq.AddBlock(%q, %d, %d)", con.topic, p, offset)
 				ocreq.AddBlock(con.topic, p, offset, 0, "")
@@ -1579,10 +1581,13 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 				continue // omit this partition, we don't have a proper offset for this partition b/c we have not yet received any msgs on this partition yet
 			}
 			if len(partition.buckets) != 0 {
+				dbgf("%s/%d bucket at offset %d is %d,%d", con.topic, p, offset, partition.buckets[0][0], partition.buckets[0][1])
 				if partition.buckets[0][0] == partition.buckets[0][1] {
-					// add to that the portion of the last block we know been completed (this is useful when the message rate is slow)
-					offset += int64(partition.buckets[0][1])
-				} // else we don't know enough to commit any further
+					// we can advance (or repeat) the highwater mark in the 1st bucket
+					partition.bucket_0_highwater = partition.buckets[0][1]
+				} // else we don't know enough to advance the highwater mark
+				// add to that the portion of the last block we know been completed (this is useful when the message rate is slow)
+				offset += int64(partition.bucket_0_highwater)
 			}
 			c.resp <- commit_resp{topic: con.topic, partition: p, offset: offset}
 		}
@@ -1663,6 +1668,7 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 			for part.buckets[0] == [2]uint8{64, 64} {
 				// the oldest bucket is complete; advance the last committed offset
 				part.oldest += 64
+				part.bucket_0_highwater = 0
 				part.buckets = part.buckets[1:]
 				if len(part.buckets) == 0 {
 					break
@@ -1951,8 +1957,9 @@ type partition struct {
 	// buckets of # of offsets read from kafka, and the # of offsets completed by a call to Done(). the difference is the # of offsets in flight in the calling code
 	// we group offsets in groups of 64 and simply keep a count of how many are outstanding
 	// any time the two counts are equal then the offsets are committable. Otherwise we can't tell which is the not yet Done() offset and so we don't know
-	buckets [][2]uint8
-	oldest  int64 // 1st offset in bucket[0], or OffsetNewest or OffsetOldest if we haven't received any msgs and started at one of those offsets
+	buckets            [][2]uint8
+	bucket_0_highwater uint8 // highwater mark of commits from buckets[0]
+	oldest             int64 // 1st offset in bucket[0], or OffsetNewest or OffsetOldest if we haven't received any msgs and started at one of those offsets
 }
 
 // wrap a sarama.ConsumerError into an *Error
