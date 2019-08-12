@@ -715,13 +715,19 @@ join_loop:
 			err = jresp.Err
 		}
 		if err != nil {
-			err = cl.makeError("joining group", err)
-			// if it is still early (the 1st iteration of this loop) then return the error and bail out
-			if early_rc != nil {
-				early_rc <- err
-				return
+			switch err {
+			case sarama.ErrRebalanceInProgress:
+				// The "error" whenever the kafka consumer group starts a new generation is correct, expected, and normal
+				logf("new consumer group %q generation forming (discovered while joining group): %v", cl.group_name, err)
+			default:
+				err = cl.makeError("joining group", err)
+				// if it is still early (the 1st iteration of this loop) then return the error and bail out
+				if early_rc != nil {
+					early_rc <- err
+					return
+				}
+				cl.deliverError("", err)
 			}
-			cl.deliverError("", err)
 
 			pause = true
 			continue join_loop
@@ -788,7 +794,13 @@ join_loop:
 			err = sresp.Err
 		}
 		if err != nil {
-			cl.deliverError("synchronizing group", err)
+			switch err {
+			case sarama.ErrRebalanceInProgress:
+				// The "error" whenever the kafka consumer group starts a new generation is correct, expected, and normal
+				logf("new consumer group %q generation forming (discovered while synchronizing group): %v", cl.group_name, err)
+			default:
+				cl.deliverError("synchronizing group", err)
+			}
 			pause = true
 			continue join_loop
 		}
@@ -899,7 +911,13 @@ join_loop:
 					err = resp.Err
 				}
 				if err != nil {
-					cl.deliverError("heartbeating with "+coor.Addr(), err)
+					switch err {
+					case sarama.ErrRebalanceInProgress, sarama.ErrIllegalGeneration:
+						// The "error" whenever the kafka consumer group starts a new generation is correct, expected, and normal
+						logf("consumer group %q at %v is rebalancing: %v; rejoining new generation", cl.group_name, coor.Addr(), err)
+					default:
+						cl.deliverError("heartbeating with "+coor.Addr(), err)
+					}
 					// we've got heartbeat troubles of one kind or another; disconnect and reconnect
 					continue join_loop
 				}
@@ -954,7 +972,13 @@ join_loop:
 						for p, kerr := range partitions {
 							if kerr != 0 {
 								if kerr != prev_kerr {
-									cl.deliverError(fmt.Sprintf("committing offset of topic %q partition %d", topic, p), kerr)
+									switch kerr {
+									case sarama.ErrRebalanceInProgress, sarama.ErrIllegalGeneration:
+										// The "error" whenever the kafka consumer group starts a new generation is correct, expected, and normal
+										logf("new consumer group %q generation forming (discovered while committing offset of topic %q partition %d): %v; will publish to side-channel instead", cl.group_name, topic, p, kerr)
+									default:
+										cl.deliverError(fmt.Sprintf("committing offset of topic %q partition %d", topic, p), kerr)
+									}
 									prev_kerr = kerr
 								} else {
 									dbgf("same error committing offset of topic %q partition %d", topic, p, kerr)
@@ -1545,7 +1569,13 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 				for p, kerr := range partitions {
 					if kerr != 0 {
 						if kerr != prev_kerr {
-							con.deliverError("committing offset", p, kerr)
+							switch kerr {
+							case sarama.ErrRebalanceInProgress, sarama.ErrIllegalGeneration:
+								// The "error" whenever the kafka consumer group starts a new generation is correct, expected, and normal
+								logf("new consumer group %q generation forming (discovered while committing offset of topic %q partition %d): %v; will publish to side-channel instead", con.cl.group_name, con.topic, p, kerr)
+							default:
+								con.deliverError("committing offset", p, kerr)
+							}
 							prev_kerr = kerr
 						} else {
 							dbgf("same error committing offset of topic %q partition %d", con.topic, p, kerr)
