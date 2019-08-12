@@ -80,18 +80,21 @@ func TestNoOlderThan1Minute(t *testing.T) {
 // a fake sarama.Client which maps time -> offsets using time
 type fakeClient struct{ t *testing.T }
 
-func (*fakeClient) Brokers() []*sarama.Broker                                      { return nil }
-func (*fakeClient) Topics() ([]string, error)                                      { return nil, nil }
-func (*fakeClient) Partitions(topic string) ([]int32, error)                       { return nil, nil }
-func (*fakeClient) WritablePartitions(topic string) ([]int32, error)               { return nil, nil }
-func (*fakeClient) Leader(topic string, partitionID int32) (*sarama.Broker, error) { return nil, nil }
-func (*fakeClient) Replicas(topic string, partitionID int32) ([]int32, error)      { return nil, nil }
-func (*fakeClient) RefreshMetadata(topics ...string) error                         { return nil }
-func (*fakeClient) Coordinator(consumerGroup string) (*sarama.Broker, error)       { return nil, nil }
-func (*fakeClient) RefreshCoordinator(consumerGroup string) error                  { return nil }
-func (*fakeClient) Close() error                                                   { return nil }
-func (*fakeClient) Closed() bool                                                   { return false }
-func (*fakeClient) InSyncReplicas(string, int32) ([]int32, error)                  { return nil, nil }
+func (*fakeClient) Brokers() []*sarama.Broker                                        { return nil }
+func (*fakeClient) Topics() ([]string, error)                                        { return nil, nil }
+func (*fakeClient) Partitions(topic string) ([]int32, error)                         { return nil, nil }
+func (*fakeClient) WritablePartitions(topic string) ([]int32, error)                 { return nil, nil }
+func (*fakeClient) Leader(topic string, partitionID int32) (*sarama.Broker, error)   { return nil, nil }
+func (*fakeClient) Replicas(topic string, partitionID int32) ([]int32, error)        { return nil, nil }
+func (*fakeClient) RefreshMetadata(topics ...string) error                           { return nil }
+func (*fakeClient) Coordinator(consumerGroup string) (*sarama.Broker, error)         { return nil, nil }
+func (*fakeClient) RefreshCoordinator(consumerGroup string) error                    { return nil }
+func (*fakeClient) Close() error                                                     { return nil }
+func (*fakeClient) Closed() bool                                                     { return false }
+func (*fakeClient) InSyncReplicas(string, int32) ([]int32, error)                    { return nil, nil }
+func (*fakeClient) Controller() (*sarama.Broker, error)                              { return nil, nil }
+func (*fakeClient) InitProducerID() (*sarama.InitProducerIDResponse, error)          { return nil, nil }
+func (*fakeClient) OfflineReplicas(topic string, partitionID int32) ([]int32, error) { return nil, nil }
 
 func (cl *fakeClient) GetOffset(topic string, partition int32, ts_msec int64) (int64, error) {
 	offset := time.Unix(ts_msec/1000, (ts_msec%1000)*1000000).UnixNano()

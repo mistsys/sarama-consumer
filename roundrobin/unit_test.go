@@ -163,3 +163,15 @@ func (mc *mockClient) Closed() bool {
 func (mc *mockClient) InSyncReplicas(string, int32) ([]int32, error) {
 	return nil, sarama.ErrNotEnoughReplicas
 }
+
+func (mc *mockClient) Controller() (*sarama.Broker, error) {
+	return nil, nil
+}
+
+func (mc *mockClient) InitProducerID() (*sarama.InitProducerIDResponse, error) {
+	return nil, nil
+}
+
+func (mc *mockClient) OfflineReplicas(topic string, partitionID int32) ([]int32, error) {
+	return nil, nil
+}

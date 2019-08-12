@@ -609,6 +609,18 @@ func (mc *mockClient) InSyncReplicas(string, int32) ([]int32, error) {
 	return nil, sarama.ErrNotEnoughReplicas
 }
 
+func (mc *mockClient) Controller() (*sarama.Broker, error) {
+	return nil, nil
+}
+
+func (mc *mockClient) InitProducerID() (*sarama.InitProducerIDResponse, error) {
+	return nil, nil
+}
+
+func (mc *mockClient) OfflineReplicas(topic string, partitionID int32) ([]int32, error) {
+	return nil, nil
+}
+
 // a sortable, comparible list of partition ids
 type partitionslist []int32 // a list of the partition ids
 
