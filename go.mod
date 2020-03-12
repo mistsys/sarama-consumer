@@ -4,10 +4,9 @@ go 1.12
 
 require (
 	github.com/DataDog/zstd v1.4.4 // indirect
-	github.com/Shopify/sarama v1.24.1
+	github.com/Shopify/sarama v1.25.0
 	github.com/eapache/go-resiliency v1.2.0 // indirect
 	github.com/jcmturner/gofork v1.0.0 // indirect
-	github.com/klauspost/compress v1.9.5 // indirect
 	github.com/kr/pretty v0.1.0
 	github.com/pkg/profile v1.3.0 // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20190706150252-9beb055b7962 // indirect

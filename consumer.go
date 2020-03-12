@@ -538,8 +538,8 @@ func (cl *client) run(early_rc chan<- error) {
 	// start the commit timer
 	var commit_timer <-chan time.Time
 	clconfig := cl.client.Config()
-	if clconfig.Consumer.Offsets.CommitInterval > 0 {
-		commit_ticker := time.NewTicker(clconfig.Consumer.Offsets.CommitInterval)
+	if clconfig.Consumer.Offsets.AutoCommit.Interval > 0 {
+		commit_ticker := time.NewTicker(clconfig.Consumer.Offsets.AutoCommit.Interval)
 		commit_timer = commit_ticker.C
 		defer commit_ticker.Stop()
 	} // else don't commit periodically (we still commit when closing down)
