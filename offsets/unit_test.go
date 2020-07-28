@@ -93,6 +93,7 @@ func (*fakeClient) Close() error                                                
 func (*fakeClient) Closed() bool                                                     { return false }
 func (*fakeClient) InSyncReplicas(string, int32) ([]int32, error)                    { return nil, nil }
 func (*fakeClient) Controller() (*sarama.Broker, error)                              { return nil, nil }
+func (*fakeClient) RefreshController() (*sarama.Broker, error)                       { return nil, nil }
 func (*fakeClient) InitProducerID() (*sarama.InitProducerIDResponse, error)          { return nil, nil }
 func (*fakeClient) OfflineReplicas(topic string, partitionID int32) ([]int32, error) { return nil, nil }
 

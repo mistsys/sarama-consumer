@@ -573,53 +573,27 @@ func (mc *mockClient) WritablePartitions(topic string) ([]int32, error) {
 	return mc.Partitions(topic)
 }
 
-func (mc *mockClient) Leader(topic string, part int32) (*sarama.Broker, error) {
+func (*mockClient) Leader(topic string, part int32) (*sarama.Broker, error) {
 	return nil, sarama.ErrBrokerNotAvailable
 }
-
-func (mc *mockClient) Replicas(topic string, part int32) ([]int32, error) {
+func (*mockClient) Replicas(topic string, part int32) ([]int32, error) {
 	return nil, sarama.ErrNotEnoughReplicas
 }
-
-func (mc *mockClient) RefreshMetadata(topics ...string) error {
-	return nil
-}
-
-func (mc *mockClient) GetOffset(topic string, part int32, time int64) (int64, error) {
-	return 0, nil
-}
-
-func (mc *mockClient) Coordinator(group string) (*sarama.Broker, error) {
+func (*mockClient) RefreshMetadata(topics ...string) error                        { return nil }
+func (*mockClient) GetOffset(topic string, part int32, time int64) (int64, error) { return 0, nil }
+func (*mockClient) Coordinator(group string) (*sarama.Broker, error) {
 	return nil, sarama.ErrBrokerNotAvailable
 }
-
-func (mc *mockClient) RefreshCoordinator(group string) error {
-	return nil
-}
-
-func (mc *mockClient) Close() error {
-	return nil
-}
-
-func (mc *mockClient) Closed() bool {
-	return false
-}
-
-func (mc *mockClient) InSyncReplicas(string, int32) ([]int32, error) {
+func (*mockClient) RefreshCoordinator(group string) error { return nil }
+func (*mockClient) Close() error                          { return nil }
+func (*mockClient) Closed() bool                          { return false }
+func (*mockClient) InSyncReplicas(string, int32) ([]int32, error) {
 	return nil, sarama.ErrNotEnoughReplicas
 }
-
-func (mc *mockClient) Controller() (*sarama.Broker, error) {
-	return nil, nil
-}
-
-func (mc *mockClient) InitProducerID() (*sarama.InitProducerIDResponse, error) {
-	return nil, nil
-}
-
-func (mc *mockClient) OfflineReplicas(topic string, partitionID int32) ([]int32, error) {
-	return nil, nil
-}
+func (*mockClient) Controller() (*sarama.Broker, error)                              { return nil, nil }
+func (*mockClient) RefreshController() (*sarama.Broker, error)                       { return nil, nil }
+func (*mockClient) InitProducerID() (*sarama.InitProducerIDResponse, error)          { return nil, nil }
+func (*mockClient) OfflineReplicas(topic string, partitionID int32) ([]int32, error) { return nil, nil }
 
 // a sortable, comparible list of partition ids
 type partitionslist []int32 // a list of the partition ids
