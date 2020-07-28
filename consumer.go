@@ -1692,7 +1692,6 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 			if part.next_commit_offset <= msg.Offset {
 				part.next_commit_offset = msg.Offset + 1
 			}
-			return
 		} else {
 			// keep track of exactly which offsets have been committed
 			delta := msg.Offset - part.next_commit_offset
