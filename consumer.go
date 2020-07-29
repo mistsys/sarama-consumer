@@ -125,10 +125,12 @@ type Config struct {
 	// partition assignment.
 	AssignmentNotification AssignmentNotification
 
-	// AllowOutOfOrderDone enables extra processing so that Done() can be called out of order, and the Consumer
-	// sorts out which is the highest committable offset. This means that Done() must be called for every message,
-	// rather than only for the latest. This is the historical behavior, so it is enabled by default.
-	AllowOutOfOlderDone bool
+	// InOrderDone disables extra processing which permits Done() to be called out of ordera.
+	// If InOrderDone is true then Done() does not have to be be called for every message.
+	// The caller can wait and call Done() once to indicate that processing is complete for
+	// all messages up to and including the argument message in the argument's partition.
+	// This is not the historical behavior, so it is disabled by default.
+	InOrderDone bool
 }
 
 // types of the functions in the Config
@@ -160,7 +162,6 @@ func NewConfig() *Config {
 	cfg.OffsetOutOfRange = DefaultOffsetOutOfRange
 	cfg.StartingOffset = DefaultStartingOffset
 	cfg.SidechannelTopic = "sarama-consumer-sidechannel-offsets"
-	cfg.AllowOutOfOlderDone = true // maintain the historical behavior for backwards compatibility
 	return cfg
 }
 
@@ -334,10 +335,10 @@ func (cl *client) Consume(topic string) (Consumer, error) {
 	chanbufsize := cl.client.Config().ChannelBufferSize // give ourselves some capacity once I know it runs right without any (capacity hides bugs :-)
 
 	con := &consumer{
-		cl:               cl,
-		consumer:         sarama_consumer,
-		topic:            topic,
-		ooo_done_support: cl.config.AllowOutOfOlderDone,
+		cl:            cl,
+		consumer:      sarama_consumer,
+		topic:         topic,
+		in_order_done: cl.config.InOrderDone,
 
 		messages: make(chan *sarama.ConsumerMessage, chanbufsize),
 
@@ -350,7 +351,7 @@ func (cl *client) Consume(topic string) (Consumer, error) {
 		restart_partitions: make(chan *partition),
 		done:               make(chan *sarama.ConsumerMessage, chanbufsize),
 	}
-	if con.ooo_done_support {
+	if !con.in_order_done {
 		con.premessages = make(chan *sarama.ConsumerMessage, chanbufsize)
 	}
 
@@ -376,10 +377,10 @@ func (cl *client) ConsumeMany(topics []string) ([]Consumer, error) {
 	consumers := make([]*consumer, len(topics))
 	for i, topic := range topics {
 		consumers[i] = &consumer{
-			cl:               cl,
-			consumer:         sarama_consumer,
-			topic:            topic,
-			ooo_done_support: cl.config.AllowOutOfOlderDone,
+			cl:            cl,
+			consumer:      sarama_consumer,
+			topic:         topic,
+			in_order_done: cl.config.InOrderDone,
 
 			messages: make(chan *sarama.ConsumerMessage, chanbufsize),
 
@@ -392,7 +393,7 @@ func (cl *client) ConsumeMany(topics []string) ([]Consumer, error) {
 			restart_partitions: make(chan *partition),
 			done:               make(chan *sarama.ConsumerMessage, chanbufsize),
 		}
-		if consumers[i].ooo_done_support {
+		if !consumers[i].in_order_done {
 			consumers[i].premessages = make(chan *sarama.ConsumerMessage, chanbufsize)
 		}
 	}
@@ -1445,11 +1446,11 @@ func (cl *client) deliverError(context string, err error) {
 
 // consumer implements the Consumer interface
 type consumer struct {
-	cl               *client
-	consumer         sarama.Consumer
-	topic            string
-	ooo_done_support bool // if true then we allow calling Done() in a different order than message receive order, and keep track of the highest comittable offset ourselves
-	// if false then Done() must be called in message receive order, though skipping over some messages is always allowed
+	cl            *client
+	consumer      sarama.Consumer
+	topic         string
+	in_order_done bool // if true then calling Done() marks all messages up to and including the argument as done.
+	// if false then Done() must be called for each message, but need not be called in message receive order.
 
 	messages chan *sarama.ConsumerMessage
 
@@ -1461,7 +1462,7 @@ type consumer struct {
 	commit_reqs chan commit_req  // channel over which client.run sends consumer.run request to fill out a OffsetCommitRequest
 
 	restart_partitions chan *partition              // channel through which partition.run delivers partition restart [at new offset] requests
-	premessages        chan *sarama.ConsumerMessage // channel through which partition.run delivers messages to consumer.run if ooo_done_support. nil otherwise
+	premessages        chan *sarama.ConsumerMessage // channel through which partition.run delivers messages to consumer.run if !in_order_done. nil otherwise
 	done               chan *sarama.ConsumerMessage // channel through which Done() returns messages
 }
 
@@ -1687,7 +1688,7 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 			return
 		}
 
-		if !con.ooo_done_support {
+		if con.in_order_done {
 			// if this advances the commit offset, then record it. otherwise ignore it
 			if part.next_commit_offset <= msg.Offset {
 				part.next_commit_offset = msg.Offset + 1
@@ -2006,12 +2007,12 @@ type partition struct {
 	consumer  sarama.PartitionConsumer
 	partition int32 // partition number
 
-	next_commit_offset int64 // the offset to commit to kafka (by convention the most recently completed msg's Offset+1). When ooo_done_support this is the offset of bucket[0]. Can be OffsetNewest or OffsetOldest if we haven't received any msgs and started at one of those offsets.
+	next_commit_offset int64 // the offset to commit to kafka (by convention the most recently completed msg's Offset+1). When !in_order_done this is the offset of bucket[0]. Can be OffsetNewest or OffsetOldest if we haven't received any msgs and started at one of those offsets.
 
 	// buckets of # of offsets read from kafka, and the # of offsets completed by a call to Done(). the difference is the # of offsets in flight in the calling code
 	// we group offsets in groups of 128 (offsets_per_bucket) and simply keep a count of how many are outstanding
 	// any time the two counts are equal then the offsets are committable. Otherwise we can't tell which is the not yet Done() offset and so we don't know
-	// These are used only if con.ooo_done_support is enabled.
+	// These are used only if con.in_order_done is disabled.
 	buckets            []bucket
 	bucket_0_highwater uint8 // highwater mark of commits from buckets[0]
 }
@@ -2037,7 +2038,7 @@ func (part *partition) makeConsumerError(cerr *sarama.ConsumerError) *Error {
 // return the offset to commit to kafka
 func (part *partition) compute_commit_offset() int64 {
 	offset := part.next_commit_offset
-	if part.con.ooo_done_support {
+	if !part.con.in_order_done {
 		if offset != sarama.OffsetNewest && offset != sarama.OffsetOldest {
 			// add to that the portion of the last block we know has been completed (this is often useful when the traffic rate is low or a client shuts down cleanly, since it has probably cleanly returned all offsets we've delivered)
 			offset += int64(part.bucket_0_highwater)
@@ -2053,7 +2054,7 @@ func (part *partition) run() {
 	msgs := part.consumer.Messages()
 	errors := part.consumer.Errors()
 	sink := con.messages
-	if con.ooo_done_support {
+	if !con.in_order_done {
 		// messages have to go throught a pre-delivery step
 		sink = con.premessages
 	}
