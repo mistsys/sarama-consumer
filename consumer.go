@@ -131,12 +131,23 @@ type Config struct {
 	// all messages up to and including the argument message in the argument's partition.
 	// This is not the historical behavior, so it is disabled by default.
 	InOrderDone bool
+
+	// NoMessages disables fetching and receiving sarama.ConsumerMessage. So the consumer group participation is performed,
+	// but fetching the kafka messages is left to the caller's code (presumably using sarama.Broker.Fetch or similar low level API)
+	// NoMessages requires InOrderDone, since without seeing the messages ingress the group consumer cannot keep track of which
+	// haven't been completed.
+	NoMessages bool
+
+	// PartitionStartNotification is an optional callback to inform client code of the (partition,offset) at which we've
+	// started consuming (or, if NoMessages, at which we think the caller should start consuming)
+	PartitionStartNotification PartitionStartNotification
 }
 
 // types of the functions in the Config
 type StartingOffset func(topic string, partition int32, committed_offset int64, client sarama.Client) (offset int64, err error)
 type OffsetOutOfRange func(topic string, partition int32, client sarama.Client) (offset int64, err error)
-type AssignmentNotification func(assignments map[string][]int32) // assignments is a map from topic -> list of partitions
+type AssignmentNotification func(assignments map[string][]int32)                  // assignments is a map from topic -> list of partitions
+type PartitionStartNotification func(topic string, partition int32, offset int64) // position at which we're going to start consuming from the partition
 
 // default implementation of Config.OffsetOutOfRange jumps to the current head of the partition.
 func DefaultOffsetOutOfRange(topic string, partition int32, client sarama.Client) (int64, error) {
@@ -184,6 +195,11 @@ func NewConfig() *Config {
   and sarama.Config.Metadata.RefreshFrequency
 */
 func NewClient(group_name string, config *Config, sarama_client sarama.Client) (Client, error) {
+
+	// sanity check
+	if config.NoMessages && !config.InOrderDone {
+		return nil, fmt.Errorf("invalid sarama-consumer.Config: .NoMessages requires .InOrderDone")
+	}
 
 	cl := &client{
 		client:     sarama_client,
@@ -348,11 +364,13 @@ func (cl *client) Consume(topic string) (Consumer, error) {
 		assignments: make(chan *assignment, 1),
 		commit_reqs: make(chan commit_req),
 
-		restart_partitions: make(chan *partition),
-		done:               make(chan *sarama.ConsumerMessage, chanbufsize),
+		done: make(chan *sarama.ConsumerMessage, chanbufsize),
 	}
 	if !con.in_order_done {
 		con.premessages = make(chan *sarama.ConsumerMessage, chanbufsize)
+	}
+	if !con.cl.config.NoMessages {
+		con.restart_partitions = make(chan *partition)
 	}
 
 	reply := make(chan error)
@@ -1461,7 +1479,7 @@ type consumer struct {
 	assignments chan *assignment // channel over which client.run sends consumer.run each generation's partition assignments
 	commit_reqs chan commit_req  // channel over which client.run sends consumer.run request to fill out a OffsetCommitRequest
 
-	restart_partitions chan *partition              // channel through which partition.run delivers partition restart [at new offset] requests
+	restart_partitions chan *partition              // channel through which partition.run delivers partition restart [at new offset] requests if !Config.NoMessages. nil otherwise
 	premessages        chan *sarama.ConsumerMessage // channel through which partition.run delivers messages to consumer.run if !in_order_done. nil otherwise
 	done               chan *sarama.ConsumerMessage // channel through which Done() returns messages
 }
@@ -1564,7 +1582,9 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 			// stop consuming from partition p
 			if part, ok := partitions[p]; ok {
 				delete(partitions, p)
-				part.consumer.Close()
+				if part.consumer != nil {
+					part.consumer.Close()
+				}
 				offset := part.compute_commit_offset()
 				if offset == sarama.OffsetNewest || offset == sarama.OffsetOldest {
 					continue // omit this partition, we don't have a proper offset for this partition b/c we have not yet received any msgs on this partition yet
@@ -1834,32 +1854,40 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 
 				logf("consumer %q consuming %q partition %d at offset %d", con.cl.group_name, con.topic, p, offset)
 
-				consumer, err := con.consumer.ConsumePartition(con.topic, p, offset)
-				if err != nil {
-					con.deliverError(fmt.Sprintf("sarama.ConsumePartition at offset %d", offset), p, err)
-
-					// If the error is ErrOffsetOutOfRange then give ourselves one chance to recover
-					if err != sarama.ErrOffsetOutOfRange {
-						// otherwise we can't consume this partition.
-						return
+				var consumer sarama.PartitionConsumer
+				if con.cl.config.NoMessages {
+					// don't fetch messages. Let the caller do their own msg fetching.
+					if con.cl.config.PartitionStartNotification != nil {
+						con.cl.config.PartitionStartNotification(con.topic, p, offset)
 					}
-
-					offset, err = con.cl.config.OffsetOutOfRange(con.topic, p, con.cl.client)
-					if err != nil {
-						// should we deliver them their own error? I guess so.
-						con.deliverError("OffsetOutOfRange callback", p, err)
-						return
-					}
-
-					logf("consumer %q skipping to %q partition %d offset %d", con.cl.group_name, con.topic, p, offset)
+				} else {
 					consumer, err = con.consumer.ConsumePartition(con.topic, p, offset)
 					if err != nil {
 						con.deliverError(fmt.Sprintf("sarama.ConsumePartition at offset %d", offset), p, err)
-						// it didn't work with their offset either. give up
-						// (we could go into a loop and call them again, but what would that solve?)
-						return
+
+						// If the error is ErrOffsetOutOfRange then give ourselves one chance to recover
+						if err != sarama.ErrOffsetOutOfRange {
+							// otherwise we can't consume this partition.
+							return
+						}
+
+						offset, err = con.cl.config.OffsetOutOfRange(con.topic, p, con.cl.client)
+						if err != nil {
+							// should we deliver them their own error? I guess so.
+							con.deliverError("OffsetOutOfRange callback", p, err)
+							return
+						}
+
+						logf("consumer %q skipping to %q partition %d offset %d", con.cl.group_name, con.topic, p, offset)
+						consumer, err = con.consumer.ConsumePartition(con.topic, p, offset)
+						if err != nil {
+							con.deliverError(fmt.Sprintf("sarama.ConsumePartition at offset %d", offset), p, err)
+							// it didn't work with their offset either. give up
+							// (we could go into a loop and call them again, but what would that solve?)
+							return
+						}
+						// it worked with the new offset; carry on
 					}
-					// it worked with the new offset; carry on
 				}
 
 				part := &partition{
@@ -1868,7 +1896,10 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 					partition:          p,
 					next_commit_offset: offset,
 				}
-				go part.run()
+
+				if !con.cl.config.NoMessages {
+					go part.run()
+				}
 
 				started <- part
 			}(p)
@@ -2004,8 +2035,8 @@ func (con *consumer) Done(msg *sarama.ConsumerMessage) {
 // partition contains the data associated with us consuming one partition
 type partition struct {
 	con       *consumer
-	consumer  sarama.PartitionConsumer
-	partition int32 // partition number
+	consumer  sarama.PartitionConsumer // nil if Config.NoMessages is set
+	partition int32                    // partition number
 
 	next_commit_offset int64 // the offset to commit to kafka (by convention the most recently completed msg's Offset+1). When !in_order_done this is the offset of bucket[0]. Can be OffsetNewest or OffsetOldest if we haven't received any msgs and started at one of those offsets.
 
