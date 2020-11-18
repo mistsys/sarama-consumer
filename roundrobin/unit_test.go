@@ -149,3 +149,4 @@ func (*mockClient) Controller() (*sarama.Broker, error)                         
 func (*mockClient) RefreshController() (*sarama.Broker, error)                       { return nil, nil }
 func (*mockClient) InitProducerID() (*sarama.InitProducerIDResponse, error)          { return nil, nil }
 func (*mockClient) OfflineReplicas(topic string, partitionID int32) ([]int32, error) { return nil, nil }
+func (*mockClient) RefreshBrokers(addrs []string) error                              { return nil }
