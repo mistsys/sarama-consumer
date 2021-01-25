@@ -77,3 +77,11 @@ func NoOlderThan(max time.Duration) (consumer.StartingOffset, consumer.OffsetOut
 			return sarama.OffsetNewest, nil
 		}
 }
+
+// A function which returns the oldest offset as the starting offset.
+func offsetOldest() (consumer.StartingOffset) {
+
+	return func(topic string, partition int32, committed_offset int64, client sarama.Client) (offset int64, err error) {
+		return sarama.OffsetOldest, nil
+	}
+}

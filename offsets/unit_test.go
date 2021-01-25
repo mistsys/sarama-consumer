@@ -77,6 +77,20 @@ func TestNoOlderThan1Minute(t *testing.T) {
 	}
 }
 
+func TestOffsetOldest(t *testing.T) {
+	sa := offsetOldest()
+	cl := &fakeClient{t}
+
+	o, err := sa("topic1", 0, 100, cl)
+	t.Logf("Committed offset 100 is ignored and uses %d", o )
+	if err != nil {
+		t.Error(err)
+	}
+	if o != sarama.OffsetOldest {
+		t.Error("unexpected", o)
+	}
+}
+
 // a fake sarama.Client which maps time -> offsets using time
 type fakeClient struct{ t *testing.T }
 
