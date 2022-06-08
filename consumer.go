@@ -100,7 +100,8 @@ type Config struct {
 	// the partitioner used to map partitions to consumer group members (defaults to a round-robin partitioner)
 	Partitioner Partitioner
 
-	// OffsetOutOfRange is the handler for sarama.ErrOffsetOutOfRange errors (defaults to sarama.OffsetNewest,nil).
+	// OffsetOutOfRange is the handler for sarama.ErrOffsetOutOfRange errors (defaults to sarama.OffsetNewest,nil),
+	// and messages older than MaxMessageAge if MaxMessageAge is set.
 	// Implementations must return the new starting offset in the partition, or an error. The sarama.Client is included
 	// for convenience, since handling this might involve querying the partition's current offsets.
 	OffsetOutOfRange OffsetOutOfRange
@@ -141,6 +142,13 @@ type Config struct {
 	// PartitionStartNotification is an optional callback to inform client code of the (partition,offset) at which we've
 	// started consuming (or, if NoMessages, at which we think the caller should start consuming)
 	PartitionStartNotification PartitionStartNotification
+
+	// MaxMessageAge is a optional function mapping a topic to the maximum lag the consumer should try and maintain in that topic. If the consumer
+	// lags more than MaxMessageAge (as compared with the sarama.ConsumerMessage.Timestamp) it declares an OffsetOutOfRange condition, and restarts
+	// where OffsetOutOfRange() indicates. (by default that's OffsetNewest, which might not be what you want, so override OffsetOutOfRange too)
+	// Note that this is not absolute, since there's always some lag, and pipelining, and in a low message frequency
+	// partition MaxMessageAge might not make sense. Returning 0 disables this functionality.
+	MaxMessageAge func(topic string) time.Duration
 }
 
 // types of the functions in the Config
@@ -366,6 +374,9 @@ func (cl *client) Consume(topic string) (Consumer, error) {
 
 		done: make(chan *sarama.ConsumerMessage, chanbufsize),
 	}
+	if cl.config.MaxMessageAge != nil {
+		con.max_age = cl.config.MaxMessageAge(topic)
+	}
 	if !con.in_order_done {
 		con.premessages = make(chan *sarama.ConsumerMessage, chanbufsize)
 	}
@@ -410,6 +421,9 @@ func (cl *client) ConsumeMany(topics []string) ([]Consumer, error) {
 
 			restart_partitions: make(chan *partition),
 			done:               make(chan *sarama.ConsumerMessage, chanbufsize),
+		}
+		if cl.config.MaxMessageAge != nil {
+			consumers[i].max_age = cl.config.MaxMessageAge(topic)
 		}
 		if !consumers[i].in_order_done {
 			consumers[i].premessages = make(chan *sarama.ConsumerMessage, chanbufsize)
@@ -1469,6 +1483,7 @@ type consumer struct {
 	topic         string
 	in_order_done bool // if true then calling Done() marks all messages up to and including the argument as done.
 	// if false then Done() must be called for each message, but need not be called in message receive order.
+	max_age time.Duration // 0, or maximum message age before we call OffsetOutOfRange() and [presumably] skip ahead
 
 	messages chan *sarama.ConsumerMessage
 
@@ -2089,11 +2104,25 @@ func (part *partition) run() {
 		// messages have to go throught a pre-delivery step
 		sink = con.premessages
 	}
+	restart_requested := false
 	for {
 		select {
 		case msg, ok := <-msgs:
 			if ok {
 				msgf("got msg %q:%d/%d", msg)
+				if con.max_age > 0 && !restart_requested && !msg.Timestamp.IsZero() {
+					if age := time.Since(msg.Timestamp); age > con.max_age {
+						if depth := part.consumer.HighWaterMarkOffset() - msg.Offset; depth > 80 { // TODO make 80 configurable? Or tune it to the observed message rate?
+							logf("consumer %q lagging by %v (%d offsets) in %q partition %d offset %d; asking to skip ahead", con.cl.group_name, age, depth, con.topic, part.partition, msg.Offset)
+							select {
+							case con.restart_partitions <- part:
+								restart_requested = true
+							case <-con.closed:
+								return
+							}
+						} // else we are fewer than 80 messages behind head. don't bother skipping ahead
+					}
+				} // else max_age isn't enforced, or we're already requested to be restarted
 				select {
 				case sink <- msg:
 				case <-con.closed:
@@ -2117,6 +2146,7 @@ func (part *partition) run() {
 					logf("consumer %q of %q partition %d received ErrOffsetOutOfRange and will be restarted", con.cl.group_name, con.topic, part.partition)
 					select {
 					case con.restart_partitions <- part:
+						restart_requested = true
 					case <-con.closed:
 						return
 					}
