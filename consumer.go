@@ -720,7 +720,7 @@ join_loop:
 			var current_assignments = make(map[string][]int32, len(consumers))
 			for topic := range consumers {
 				topics = append(topics, topic)
-				if a := assignments[topic]; a != nil && len(a) != 0 { // omit any topics for which we are not assigned a partition
+				if a := assignments[topic]; len(a) != 0 { // omit any topics for which we are not assigned a partition
 					current_assignments[topic] = a
 				}
 

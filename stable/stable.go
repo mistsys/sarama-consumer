@@ -154,9 +154,7 @@ func (sp *stablePartitioner) Partition(sreq *sarama.SyncGroupRequest, jresp *sar
 			return err
 		}
 		pl := make(partitionslist, len(partitions)) // we must make a copy before we sort the list
-		for i, p := range partitions {
-			pl[i] = p
-		}
+		copy(pl, partitions)
 		sort.Sort(pl)
 		partitions_by_topic[topic] = pl
 	}

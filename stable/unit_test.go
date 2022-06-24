@@ -71,7 +71,7 @@ func (a assignments) Equal(b assignments) (bool, string) {
 
 	}
 	if len(a) != len(b) {
-		return false, fmt.Sprintf("unequal number of members")
+		return false, fmt.Sprintf("unequal number of members (%d != %d)", len(a), len(b))
 	}
 
 	return true, ""
