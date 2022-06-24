@@ -81,6 +81,7 @@ func TestNoOlderThan1Minute(t *testing.T) {
 type fakeClient struct{ t *testing.T }
 
 func (*fakeClient) Brokers() []*sarama.Broker                                        { return nil }
+func (*fakeClient) Broker(int32) (*sarama.Broker, error)                             { return nil, sarama.ErrBrokerNotFound }
 func (*fakeClient) Topics() ([]string, error)                                        { return nil, nil }
 func (*fakeClient) Partitions(topic string) ([]int32, error)                         { return nil, nil }
 func (*fakeClient) WritablePartitions(topic string) ([]int32, error)                 { return nil, nil }

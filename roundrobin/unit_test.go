@@ -105,9 +105,8 @@ func (mc *mockClient) Config() *sarama.Config {
 	return mc.config
 }
 
-func (mc *mockClient) Brokers() []*sarama.Broker {
-	return nil
-}
+func (mc *mockClient) Brokers() []*sarama.Broker            { return nil }
+func (mc *mockClient) Broker(int32) (*sarama.Broker, error) { return nil, sarama.ErrBrokerNotFound }
 
 func (mc *mockClient) Topics() ([]string, error) {
 	var topics = make([]string, 0, len(mc.partitions))

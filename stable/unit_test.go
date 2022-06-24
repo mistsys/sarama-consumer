@@ -546,9 +546,8 @@ type mockClient struct {
 	partitions map[string][]int32
 }
 
-func (mc *mockClient) Brokers() []*sarama.Broker {
-	return nil
-}
+func (mc *mockClient) Brokers() []*sarama.Broker            { return nil }
+func (mc *mockClient) Broker(int32) (*sarama.Broker, error) { return nil, sarama.ErrBrokerNotFound }
 
 func (mc *mockClient) Config() *sarama.Config {
 	return mc.config
