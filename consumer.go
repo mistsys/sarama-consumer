@@ -20,7 +20,7 @@ import (
 )
 
 const logging = true        // set to true to see log messages
-const debug = false         // set to true to see debug messages
+const debug = true          // set to true to see debug messages
 const per_msg_debug = false // set to true to see per-message debug messages
 
 // low level logging function. Replace it with your own if desired before making any calls to the rest of the API
@@ -185,22 +185,22 @@ func NewConfig() *Config {
 }
 
 /*
-  NewClient creates a new consumer group client on top of an existing
-  sarama.Client.
+NewClient creates a new consumer group client on top of an existing
+sarama.Client.
 
-  After this call the contents of config should be treated as read-only.
-  config can be nil if the defaults are acceptable.
+After this call the contents of config should be treated as read-only.
+config can be nil if the defaults are acceptable.
 
-  The consumer group name is used to match this client with other
-  instances running elsewhere, but connected to the same cluster
-  of kafka brokers and using the same consumer group name.
+The consumer group name is used to match this client with other
+instances running elsewhere, but connected to the same cluster
+of kafka brokers and using the same consumer group name.
 
-  The supplied sarama.Client should have been constructed with a sarama.Config
-  where sarama.Config.Version is >= consumer.MinVersion, and if full handling of
-  ErrOffsetOutOfRange is desired, sarama.Config.Consumer.Return.Errors = true.
+The supplied sarama.Client should have been constructed with a sarama.Config
+where sarama.Config.Version is >= consumer.MinVersion, and if full handling of
+ErrOffsetOutOfRange is desired, sarama.Config.Consumer.Return.Errors = true.
 
-  In addition, this package uses the settings in sarama.Config.Consumer.Offsets
-  and sarama.Config.Metadata.RefreshFrequency
+In addition, this package uses the settings in sarama.Config.Consumer.Offsets
+and sarama.Config.Metadata.RefreshFrequency
 */
 func NewClient(group_name string, config *Config, sarama_client sarama.Client) (Client, error) {
 
@@ -231,7 +231,7 @@ func NewClient(group_name string, config *Config, sarama_client sarama.Client) (
 }
 
 /*
-  Client is a kafaka client belonging to a consumer group. It is created by NewClient.
+Client is a kafaka client belonging to a consumer group. It is created by NewClient.
 */
 type Client interface {
 	// Consume returns a consumer of the given topic
@@ -257,15 +257,15 @@ type Client interface {
 }
 
 /*
-  Consumer is a consumer of a topic.
+Consumer is a consumer of a topic.
 
-  Messages from any partition assigned to this client arrive on the
-  channel returned by Messages.
+Messages from any partition assigned to this client arrive on the
+channel returned by Messages.
 
-  Every message read from the Messages channel should be eventually passed
-  to Done, or have its topic/partition/offset passed to MarkUpTo.
-  Calling Done is the signal that that one message has been consumed (possibly
-  out of receive order).
+Every message read from the Messages channel should be eventually passed
+to Done, or have its topic/partition/offset passed to MarkUpTo.
+Calling Done is the signal that that one message has been consumed (possibly
+out of receive order).
 */
 type Consumer interface {
 	// Messages returns the channel of messages arriving from kafka. It always
@@ -296,10 +296,10 @@ type Consumer interface {
 }
 
 /*
-  Partitioner maps partitions to consumer group members.
+Partitioner maps partitions to consumer group members.
 
-  When the user wants control over the partitioning they should set
-  Config.Partitioner to their implementation of Partitioner.
+When the user wants control over the partitioning they should set
+Config.Partitioner to their implementation of Partitioner.
 */
 type Partitioner interface {
 	// name this partitioner (used for log messages)
