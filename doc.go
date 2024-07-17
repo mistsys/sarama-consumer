@@ -7,8 +7,7 @@ and restart at the last comitted offset of each partition.
 This requires Kafka v0.9+ and follows the steps guide, described in:
 https://cwiki.apache.org/confluence/display/KAFKA/Kafka+Client-side+Assignment+Proposal
 
-
-CONFIGURATION
+# CONFIGURATION
 
 Three customization APIs may be set in the Config:
 
