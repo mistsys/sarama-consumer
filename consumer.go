@@ -1002,7 +1002,7 @@ join_loop:
 				empty := true
 				for r := range resp {
 					dbgf("ocreq.AddBlock(%q, %d, %d)", r.topic, r.partition, r.offset)
-					ocreq.AddBlock(r.topic, r.partition, r.offset, 0, "")
+					ocreq.AddBlock(r.topic, r.partition, r.offset, -1, 0, "")
 					empty = false
 				}
 				if empty {
@@ -1605,7 +1605,7 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 					continue // omit this partition, we don't have a proper offset for this partition b/c we have not yet received any msgs on this partition yet
 				}
 				dbgf("ocreq.AddBlock(%q, %d, %d)", con.topic, p, offset)
-				ocreq.AddBlock(con.topic, p, offset, 0, "")
+				ocreq.AddBlock(con.topic, p, offset, -1, 0, "")
 				sidechannel_offsets = append(sidechannel_offsets, SidechannelOffset{p, offset})
 				logf("consumer %q stopped consuming %q partition %d at offset %d", con.cl.group_name, con.topic, p, offset)
 			}

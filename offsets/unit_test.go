@@ -98,6 +98,14 @@ func (*fakeClient) RefreshController() (*sarama.Broker, error)                  
 func (*fakeClient) InitProducerID() (*sarama.InitProducerIDResponse, error)          { return nil, nil }
 func (*fakeClient) OfflineReplicas(topic string, partitionID int32) ([]int32, error) { return nil, nil }
 func (*fakeClient) RefreshBrokers(addrs []string) error                              { return nil }
+func (*fakeClient) LeaderAndEpoch(topic string, partitionID int32) (*sarama.Broker, int32, error) {
+	return nil, 0, nil
+}
+func (*fakeClient) LeastLoadedBroker() *sarama.Broker                        { return nil }
+func (*fakeClient) RefreshTransactionCoordinator(transactionID string) error { return nil }
+func (*fakeClient) TransactionCoordinator(transactionID string) (*sarama.Broker, error) {
+	return nil, nil
+}
 
 func (cl *fakeClient) GetOffset(topic string, partition int32, ts_msec int64) (int64, error) {
 	offset := time.Unix(ts_msec/1000, (ts_msec%1000)*1000000).UnixNano()
