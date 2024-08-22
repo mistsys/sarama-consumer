@@ -7,8 +7,7 @@ and restart at the last comitted offset of each partition.
 This requires Kafka v0.9+ and follows the steps guide, described in:
 https://cwiki.apache.org/confluence/display/KAFKA/Kafka+Client-side+Assignment+Proposal
 
-
-CONFIGURATION
+# CONFIGURATION
 
 Three customization APIs may be set in the Config:
 
@@ -35,15 +34,14 @@ the new consumers.
 
 Using the stable partition means setting
 
-  Config.Partitioner = stable.New(false)
+	Config.Partitioner = stable.New(false)
 
 Passing true to stable.New() returns a stable & consistent consumer. See the documentation.
 
 More complex partitioners, for example one which did some sort of weighted balancing, are yours
 to implement.
 
-
-PHILOSOPHY
+# PHILOSOPHY
 
 The consumer API has three rules the calling code must abide: messages must be passed to Consumer.Done()
 once each message does not need to be replayed, Client.Errors() must be consumed, and Client.Close()
@@ -68,6 +66,5 @@ That's 3 more lines of code, but it also lets you tune the samara.Client's confi
 to be, or even mock the client for test.)
 
 The simple use case of this package is shown in the NewClient example code.
-
 */
 package consumer
