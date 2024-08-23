@@ -456,12 +456,15 @@ func join_and_sync(jreqs []sarama.JoinGroupRequest, partitioner consumer.Partiti
 	var jresp = sarama.JoinGroupResponse{
 		GenerationId:  1,
 		GroupProtocol: partitioner.Name(),
-		Members:       make(map[string][]byte),
 	}
 	for i := range jreqs {
 		for _, gp := range jreqs[i].OrderedGroupProtocols {
 			if gp.Name == partitioner.Name() {
-				jresp.Members[jreqs[i].MemberId] = gp.Metadata
+				jresp.Members = append(jresp.Members, sarama.GroupMember{
+					MemberId:        jreqs[i].MemberId,
+					GroupInstanceId: jreqs[i].GroupInstanceId,
+					Metadata:        gp.Metadata,
+				})
 			}
 		}
 	}
@@ -489,8 +492,11 @@ func sanity_check(sreq *sarama.SyncGroupRequest, partitioner consumer.Partitione
 
 	for i := range jreqs {
 		id := jreqs[i].MemberId
-		var sresp = sarama.SyncGroupResponse{
-			MemberAssignment: sreq.GroupAssignments[id],
+		var sresp sarama.SyncGroupResponse
+		for j := range sreq.GroupAssignments {
+			if sreq.GroupAssignments[j].MemberId == id {
+				sresp.MemberAssignment = sreq.GroupAssignments[j].Assignment
+			}
 		}
 
 		act, err := partitioner.ParseSync(&sresp)
@@ -594,6 +600,14 @@ func (*mockClient) RefreshController() (*sarama.Broker, error)                  
 func (*mockClient) InitProducerID() (*sarama.InitProducerIDResponse, error)          { return nil, nil }
 func (*mockClient) OfflineReplicas(topic string, partitionID int32) ([]int32, error) { return nil, nil }
 func (*mockClient) RefreshBrokers(addrs []string) error                              { return nil }
+func (*mockClient) LeaderAndEpoch(topic string, partitionID int32) (*sarama.Broker, int32, error) {
+	return nil, 0, nil
+}
+func (*mockClient) LeastLoadedBroker() *sarama.Broker                        { return nil }
+func (*mockClient) RefreshTransactionCoordinator(transactionID string) error { return nil }
+func (*mockClient) TransactionCoordinator(transactionID string) (*sarama.Broker, error) {
+	return nil, nil
+}
 
 // a sortable, comparible list of partition ids
 type partitionslist []int32 // a list of the partition ids

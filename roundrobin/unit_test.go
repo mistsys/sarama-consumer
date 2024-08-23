@@ -41,12 +41,15 @@ func TestRoundRobin(t *testing.T) {
 	var jresp = sarama.JoinGroupResponse{
 		GenerationId:  1,
 		GroupProtocol: string(roundrobin.RoundRobin),
-		Members:       make(map[string][]byte),
 	}
 	for i := range jreqs {
 		for _, gp := range jreqs[i].OrderedGroupProtocols {
 			if gp.Name == string(roundrobin.RoundRobin) {
-				jresp.Members[jreqs[i].MemberId] = gp.Metadata
+				jresp.Members = append(jresp.Members, sarama.GroupMember{
+					MemberId:        jreqs[i].MemberId,
+					GroupInstanceId: jreqs[i].GroupInstanceId,
+					Metadata:        gp.Metadata,
+				})
 			}
 		}
 	}
@@ -73,8 +76,12 @@ func TestRoundRobin(t *testing.T) {
 	}
 
 	for i := range jreqs {
-		var sresp = sarama.SyncGroupResponse{
-			MemberAssignment: sreq.GroupAssignments[jreqs[i].MemberId],
+		id := jreqs[i].MemberId
+		var sresp sarama.SyncGroupResponse
+		for j := range sreq.GroupAssignments {
+			if sreq.GroupAssignments[j].MemberId == id {
+				sresp.MemberAssignment = sreq.GroupAssignments[j].Assignment
+			}
 		}
 
 		act, err := rr.ParseSync(&sresp)
@@ -149,3 +156,11 @@ func (*mockClient) RefreshController() (*sarama.Broker, error)                  
 func (*mockClient) InitProducerID() (*sarama.InitProducerIDResponse, error)          { return nil, nil }
 func (*mockClient) OfflineReplicas(topic string, partitionID int32) ([]int32, error) { return nil, nil }
 func (*mockClient) RefreshBrokers(addrs []string) error                              { return nil }
+func (*mockClient) LeaderAndEpoch(topic string, partitionID int32) (*sarama.Broker, int32, error) {
+	return nil, 0, nil
+}
+func (*mockClient) LeastLoadedBroker() *sarama.Broker                        { return nil }
+func (*mockClient) RefreshTransactionCoordinator(transactionID string) error { return nil }
+func (*mockClient) TransactionCoordinator(transactionID string) (*sarama.Broker, error) {
+	return nil, nil
+}
