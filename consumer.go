@@ -1709,7 +1709,7 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 			msg.Topic = con.topic
 		}
 
-		dbgf("consumer done(%q:%d/%d)", msg.Topic, msg.Partition, msg.Offset)
+		msgf("consumer done(%q:%d/%d)", msg)
 
 		// a sanity check, just in case someone passes the msg into the wrong consumer
 		if con.topic != msg.Topic {
@@ -1741,7 +1741,10 @@ func (con *consumer) run(wg *sync.WaitGroup) {
 				return
 			}
 			part.buckets[index].done++
-			dbgf("bucket[%d/%d] read %d done %d", index, len(part.buckets), part.buckets[index].read, part.buckets[index].done)
+			dbgf("bucket[%d/%d] read %d done %d (on %s/%d/%d)", index, len(part.buckets),
+				part.buckets[index].read, part.buckets[index].done,
+				msg.Topic, msg.Partition, msg.Offset,
+			)
 			if index == 0 {
 				// we might be able to advance the bucket 0 highwater mark
 				if part.buckets[0].read == part.buckets[0].done {
